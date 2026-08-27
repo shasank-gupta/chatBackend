@@ -13,19 +13,36 @@ FastAPI backend for the Chat application. It exposes REST APIs for user sign-in,
 
 ```
 chatBackend/
-├── main.py                 # FastAPI app and route definitions
-├── config.py               # Environment variable loading and validation
-├── supabase_client.py      # Supabase client singleton
-├── models.py               # Domain models (User, Group, Membership, Message)
-├── schemas.py              # API request/response schemas
+├── main.py                      # FastAPI app setup, CORS, router registration
+├── config.py                    # Environment variable loading and validation
+├── supabase_client.py           # Supabase client singleton
+├── controllers/
+│   └── chat_controller.py       # HTTP routes; delegates to ChatService
+├── services/
+│   └── chat_service.py          # Business logic, validation, auth checks
 ├── repositories/
 │   ├── user_repository.py
 │   ├── group_repository.py
 │   ├── membership_repository.py
 │   └── message_repository.py
+├── models/
+│   ├── user.py
+│   ├── group.py
+│   ├── membership.py
+│   └── message.py
+├── schemas/
+│   ├── go_request.py
+│   ├── go_response.py
+│   ├── group_out.py
+│   ├── create_group_request.py
+│   ├── add_member_request.py
+│   ├── add_member_response.py
+│   ├── create_message_request.py
+│   ├── message_out.py
+│   ├── message_poll_response.py
+│   └── message_history_response.py
 ├── requirements.txt
-├── .env.example            # Environment variable template
-├── supabase_grants.sql     # SQL grants for service_role access
+├── supabase_grants.sql          # SQL grants for service_role access
 └── README.md
 ```
 
@@ -58,7 +75,7 @@ pip install -r requirements.txt
 
 ### 2. Configure environment variables
 
-Copy `.env.example` to `.env` and fill in your Supabase credentials:
+Create a `.env` file in the project root:
 
 ```env
 HOST=0.0.0.0
@@ -86,26 +103,53 @@ API docs: [http://localhost:8000/docs](http://localhost:8000/docs)
 
 ## Architecture
 
+The backend follows a layered architecture:
+
 ```
 Client (chatUI)
     ↓ HTTP + X-User-Email header
-FastAPI (main.py)
+main.py
     ↓
-Repositories (user, group, membership, message)
+ChatController          (HTTP layer: routes, headers, query params)
     ↓
-Supabase client (PostgREST)
+ChatService             (business logic, validation, authorization)
+    ↓
+Repositories            (Supabase table operations)
+    ↓
+Supabase client         (PostgREST)
     ↓
 PostgreSQL (Supabase)
 ```
 
-- **Routes** handle HTTP, auth checks, and response mapping.
-- **Repositories** encapsulate all Supabase table operations.
-- **Models** represent database rows.
-- **Schemas** define API contracts.
+### Layer responsibilities
+
+| Layer | Location | Responsibility |
+|---|---|---|
+| **Controller** | `controllers/chat_controller.py` | Defines API routes, extracts request data, delegates to service |
+| **Service** | `services/chat_service.py` | Core business logic, validation, membership/creator checks, model → schema mapping |
+| **Repository** | `repositories/` | CRUD operations against Supabase tables |
+| **Model** | `models/` | Domain objects representing database rows |
+| **Schema** | `schemas/` | API request/response contracts (one class per file) |
+
+### Request flow example
+
+```
+POST /api/groups/{id}/members
+  → ChatController.add_group_member()     # reads header + body
+  → ChatService.add_group_member()        # validates creator, looks up user, saves membership
+  → MembershipRepository.save()           # inserts into Supabase
+```
+
+`main.py` only bootstraps the app:
+
+```python
+chat_controller = ChatController()
+app.include_router(chat_controller.router)
+```
 
 ## Authentication
 
-There is no JWT/session middleware. The frontend sends the signed-in user's email via the `X-User-Email` header (stored in a browser cookie). The backend uses this to:
+There is no JWT/session middleware. The frontend sends the signed-in user's email via the `X-User-Email` header (stored in a browser cookie). `ChatService` uses this to:
 - Look up the user
 - Verify group membership before chat or member operations
 - Restrict "add member" to the group creator
@@ -164,18 +208,19 @@ Group response shape:
 ## How it works
 
 ### Sign-in (`POST /api/go`)
-1. Upsert user by email in `users`
-2. Fetch all groups linked via `memberships`
-3. Return user info and group list
+1. `ChatService` upserts user by email in `users`
+2. Fetches all groups linked via `memberships`
+3. Returns user info and group list
 
 ### Create group
-1. Insert row into `groups` with `created_by`
-2. Insert creator into `memberships`
+1. `ChatService` validates group name and user existence
+2. `GroupRepository` inserts row into `groups` with `created_by`
+3. Creator is added to `memberships`
 
 ### Add member
-1. Verify caller is the group creator
-2. Look up target email in `users` — return `404 User not found` if missing
-3. Insert into `memberships` (idempotent if already a member)
+1. `ChatService` verifies caller is the group creator
+2. Looks up target email in `users` — returns `404 User not found` if missing
+3. `MembershipRepository` inserts into `memberships` (idempotent if already a member)
 
 ### Chat polling
 1. Initial load: latest 20 messages, ascending by `created_at`
